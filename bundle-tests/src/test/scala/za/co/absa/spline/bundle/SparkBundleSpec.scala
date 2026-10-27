@@ -60,6 +60,15 @@ class SparkBundleSpec extends AnyFunSuite with Matchers {
       entries.exists(_.startsWith("org/slf4j/")) should be(false)
       entries should not contain "scala/Predef.class"
       entries should not contain "scala/collection/immutable/List.class"
+      entries should not contain "scala/Serializable.class"
+
+      val classLoader = classOf[SplineQueryExecutionListener].getClassLoader
+      entries.filter(entry => entry.startsWith("scala/") && entry.endsWith(".class")).foreach { entry =>
+        val resources = classLoader.getResources(entry).asScala.toVector
+        withClue(s"Bundled Scala-namespace class overlaps the Spark runtime: $entry: $resources: ") {
+          resources should have size 1
+        }
+      }
 
       val sparkMinorVersion = SPARK_VERSION.split("\\.").take(2).mkString(".")
       val bundleDependencies = jarPomDependencies(jar, s"spark-$sparkMinorVersion-spline-agent-bundle_2.13")

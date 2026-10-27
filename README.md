@@ -116,6 +116,10 @@ For Spark 4.0 or 4.1, select `spark-4.0-spline-agent-bundle_2.13` or `spark-4.1-
 in the same `za.co.absa.spline.agent.spark` Maven group. These bundles use Spark-provided Scala, Spark, Hadoop, logging and common
 utility libraries rather than bundling conflicting copies. The listener and dispatcher class names are unchanged.
 
+The bundles still contain third-party `scala/*` classes from `graph-core` collection helpers and `scala-collection-compat`
+package objects; these are not classes from `scala-library`. Shaded-JAR tests check that these class resources do not overlap
+the selected Spark runtime.
+
 **AWS Glue Note**: dependency on `org.yaml:snakeyaml:1.33` is **missing** in Glue flavour of Spark. Please add this dependency on the classpath.
 
 <a id="initialization"></a>
