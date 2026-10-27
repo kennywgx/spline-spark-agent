@@ -21,6 +21,11 @@ import org.apache.kafka.clients.producer.MockProducer
 import org.apache.kafka.common.serialization.StringSerializer
 import org.apache.spark.SPARK_VERSION
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.plans.logical.AppendData
+import org.apache.spark.sql.execution.datasources.LogicalRelation
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
+import org.apache.spark.sql.execution.datasources.v2.parquet.{ParquetDataSourceV2, ParquetTable}
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
 import za.co.absa.shaded.jackson.databind.{JsonNode, ObjectMapper}
@@ -118,14 +123,16 @@ class SparkBundleSpec extends AnyFunSuite with Matchers {
     } finally producer.close()
   }
 
-  test("codeless initialization propagates to child sessions and captures Parquet plan and event lineage") {
+  test("codeless initialization propagates to child sessions and captures V1 Parquet plan and event lineage") {
     withCapturedLineage(codeless = true) { (spark, requests, directory) =>
       val child = spark.newSession()
       child.enableLineageTracking()
       val input = directory.resolve("input")
       val output = directory.resolve("output")
       child.range(3).write.parquet(input.toString)
-      child.read.parquet(input.toString).selectExpr("id", "id + 1 AS next_id").write.parquet(output.toString)
+      val transformed = child.read.parquet(input.toString).selectExpr("id", "id + 1 AS next_id")
+      transformed.queryExecution.analyzed.collect { case relation: LogicalRelation => relation } should have size 1
+      transformed.write.parquet(output.toString)
 
       val (plan, event) = awaitLineage(requests, output)
       val reads = plan.path("operations").path("reads")
@@ -137,6 +144,47 @@ class SparkBundleSpec extends AnyFunSuite with Matchers {
       event.path("durationNs").asLong() should be > 0L
       event.has("error") should be(false)
       assertNoMoreLineage(requests)
+    }
+  }
+
+  test("forced Parquet DSv2 captures V2 read/write nodes, column dependencies and a matching event") {
+    withCapturedLineage(codeless = true) { (spark, requests, directory) =>
+      val input = directory.resolve("input")
+      val output = Files.createDirectories(directory.resolve("output"))
+      spark.range(3).write.parquet(input.toString)
+      val v1Sources = spark.conf.get("spark.sql.sources.useV1SourceList").split(",")
+        .filterNot(_.trim.equalsIgnoreCase("parquet")).mkString(",")
+      spark.conf.set("spark.sql.sources.useV1SourceList", v1Sources)
+      val transformed = spark.read.parquet(input.toString).selectExpr("id", "id + 1 AS next_id")
+      val options = new CaseInsensitiveStringMap(Map("path" -> output.toString).asJava)
+      val table = new ParquetDataSourceV2().getTable(transformed.schema, Array.empty, options.asCaseSensitiveMap())
+      table shouldBe a[ParquetTable]
+      val target = DataSourceV2Relation.create(table, None, None, options)
+      // DataFrameWriter deliberately falls back to V1 for file writes (SPARK-28396).
+      // Execute the native V2 command instead of testing a V2 read followed by a V1 write.
+      val execution = spark.sessionState.executePlan(AppendData.byName(target, transformed.queryExecution.analyzed, Map.empty))
+      execution.assertCommandExecuted()
+      val write = execution.analyzed match {
+        case append: AppendData => append
+        case other => fail(s"Expected a DSv2 AppendData write, got:\n${other.treeString}")
+      }
+      write.table shouldBe a[DataSourceV2Relation]
+      val reads = write.query.collect { case relation: DataSourceV2Relation => relation }
+      reads should have size 1
+      reads.head.table shouldBe a[ParquetTable]
+
+      val (plan, event) = awaitLineage(requests, output)
+      val readOperations = plan.path("operations").path("reads")
+      readOperations.size() should be(1)
+      new URI(readOperations.get(0).path("inputSources").get(0).asText()).getPath should be(input.toString)
+      plan.path("operations").path("write").path("append").asBoolean() should be(true)
+      assertColumnDependencies(plan, Map("id" -> "id", "next_id" -> "id"))
+      plan.path("expressions").path("functions").size() should be > 0
+      event.path("planId").asText() should be(plan.path("id").asText())
+      event.path("durationNs").asLong() should be > 0L
+      event.has("error") should be(false)
+      spark.read.parquet(output.toString).orderBy("id").collect().map(row => row.getLong(0) -> row.getLong(1)).toSeq should be(
+        Seq(0L -> 1L, 1L -> 2L, 2L -> 3L))
     }
   }
 

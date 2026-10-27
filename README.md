@@ -837,8 +837,13 @@ mvn clean verify -Pscala-2.13,spark-4.1
 
 The Scala 2.13 profile builds both bundles and `bundle-tests`, without the legacy connector-heavy examples and integration-test
 modules. `bundle-tests` runs against the actual shaded JAR, covering codeless/child-session and programmatic initialization,
-Parquet and explicit-provider SQL CTAS lineage, and Kafka plan/event serialization. It does not require an external Spline server
+V1 Parquet, forced built-in Parquet DSv2 read/write nodes and column lineage, explicit-provider SQL CTAS lineage, and Kafka
+plan/event serialization. It does not require an external Spline server
 or Kafka broker. Core is compiled against Spark 4.0 and exercised on the selected Spark 4 runtime.
+
+Spark's `DataFrameWriter` falls back to V1 for file writes even when Parquet is excluded from
+`spark.sql.sources.useV1SourceList`. The DSv2 regression therefore explicitly executes Spark's native `AppendData` command
+against a built-in `ParquetTable`, checking the actual V2 read/write logical nodes, output data and dispatched lineage.
 
 Scala 2.13 builds publish resolved POMs from `target/flattened-pom.xml`, so consumers do not need to activate the build profiles
 to resolve the Spark 4 baseline and Scala 2.13 dependency versions. The bundle's already shaded dependencies are optional and
